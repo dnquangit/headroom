@@ -55,6 +55,9 @@ from headroom.copilot_auth import (
 )
 from headroom.providers.aider import build_launch_env as _build_aider_launch_env
 from headroom.providers.claude import (
+    DEFAULT_API_URL as DEFAULT_ANTHROPIC_URL,
+)
+from headroom.providers.claude import (
     TOOL_SEARCH_DEFAULT,
     TOOL_SEARCH_ENV,
 )
@@ -752,6 +755,37 @@ def _foundry_proxy_url(proxy_url: str) -> str:
     proxy URL Claude Code receives mirrors the real Foundry URL shape.
     """
     return proxy_url.rstrip("/") + "/anthropic"
+
+
+def _anthropic_target_api_url_from_env(proxy_url: str) -> str | None:
+    """Return a custom Anthropic upstream the proxy should use.
+
+    Captures the user's ANTHROPIC_BASE_URL *before* wrap overwrites it with
+    the local proxy URL, so the proxy knows where to forward compressed
+    requests. Covers z.ai and any other Anthropic-compatible gateway.
+
+    Precedence (mirrors the Vertex helper in PR #1477):
+      1. Explicit ANTHROPIC_TARGET_API_URL (Headroom internal override) wins.
+      2. Otherwise infer from ANTHROPIC_BASE_URL.
+    Both are skipped when they equal the default Anthropic endpoint (the
+    proxy already knows it) or the local proxy URL (loopback guard).
+    """
+    explicit_target = os.environ.get("ANTHROPIC_TARGET_API_URL", "").strip()
+    if explicit_target:
+        if _normalize_proxy_api_url(explicit_target) == _normalize_proxy_api_url(proxy_url):
+            return None
+        return explicit_target
+
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "").strip()
+    if not base_url:
+        return None
+
+    normalized_base = _normalize_proxy_api_url(base_url)
+    if normalized_base == _normalize_proxy_api_url(DEFAULT_ANTHROPIC_URL):
+        return None
+    if normalized_base == _normalize_proxy_api_url(proxy_url):
+        return None
+    return base_url
 
 
 def _write_claude_wrap_base_url(
@@ -3454,6 +3488,16 @@ def claude(
         # by Headroom. This is the turnkey Vertex compression path.
         use_vertex = bool(os.environ.get("CLAUDE_CODE_USE_VERTEX"))
 
+        # Detect a custom Anthropic-compatible upstream (z.ai, etc.) in DEFAULT
+        # mode — i.e. when neither Vertex nor Foundry is active. Captured BEFORE
+        # ANTHROPIC_BASE_URL is overwritten with the proxy URL so the proxy knows
+        # where to forward compressed requests. See issue #1476 / PR #1477.
+        custom_anthropic_upstream = None
+        if not use_vertex and not foundry_upstream:
+            custom_anthropic_upstream = _anthropic_target_api_url_from_env(
+                _claude_proxy_base_url(port)
+            )
+
         proxy_holder[0] = _ensure_proxy(
             port,
             no_proxy,
@@ -3463,7 +3507,7 @@ def claude(
             code_graph=code_graph,
             backend=backend,
             region=region,
-            anthropic_api_url=foundry_upstream,
+            anthropic_api_url=foundry_upstream or custom_anthropic_upstream,
         )
         _push_runtime_env(port, no_proxy)
 
