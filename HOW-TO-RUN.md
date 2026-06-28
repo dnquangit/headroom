@@ -1,6 +1,6 @@
 # HOW-TO-RUN
 
-This project adds support for configuring custom Anthropic-compatible base URLs (like z.AI) in Headroom.
+This guide walks you through running Claude Code through the Headroom proxy with a custom Anthropic-compatible provider.
 
 ## Installation
 
@@ -21,49 +21,122 @@ pip install -e .
 
 If your project uses Claude Code with the z.AI wrapper (or any other Anthropic-compatible gateway), follow these steps:
 
-### Windows Setup
+## Prerequisites — Clear conflicting environment variables
 
-Configure the environment variables:
+> :warning: This is **not** a Headroom issue — it applies whenever you use Claude Code with multiple API providers. Shell-level environment variables take precedence over `~/.claude/settings.json` and `<project>/.claude/settings.local.json`. The usual symptom is `401 Unauthorized` even when your API key is valid.
+>
+> **Only follow this section if Step 1 below fails.**
 
-```cmd
-setx ANTHROPIC_BASE_URL https://api.z.ai/api/anthropic
-setx ANTHROPIC_AUTH_TOKEN your_zai_api_key
+Three variables can interfere:
+
+| Variable               | Why it causes problems                                                 |
+|------------------------|-----------------------------------------------------------------------|
+| `ANTHROPIC_AUTH_TOKEN` | Overrides the token configured for your provider                      |
+| `ANTHROPIC_API_KEY`    | Same — overrides provider auth                                         |
+| `ANTHROPIC_BASE_URL`   | Overrides the URL Headroom writes into settings, bypassing the proxy  |
+
+### Windows — PowerShell
+
+```powershell
+# 1. Permanently remove from Windows user-level environment
+[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $null, 'User')
+[Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY',   $null, 'User')
+[Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL',  $null, 'User')
+
+# 2. Remove from the current PowerShell session (takes effect immediately)
+Remove-Item Env:\ANTHROPIC_AUTH_TOKEN, Env:\ANTHROPIC_API_KEY, Env:\ANTHROPIC_BASE_URL -ErrorAction SilentlyContinue
 ```
 
-Then run the wrapper:
+### Windows — Command Prompt (cmd.exe)
 
 ```cmd
+REM 1. Permanently remove from Windows user-level environment.
+REM    Shells out to PowerShell for the actual deletion:
+powershell -Command "[Environment]::SetEnvironmentVariable('ANTHROPIC_AUTH_TOKEN', $null, 'User'); [Environment]::SetEnvironmentVariable('ANTHROPIC_API_KEY', $null, 'User'); [Environment]::SetEnvironmentVariable('ANTHROPIC_BASE_URL', $null, 'User')"
+
+REM 2. Remove from the current cmd.exe session (takes effect immediately)
+set ANTHROPIC_AUTH_TOKEN=
+set ANTHROPIC_API_KEY=
+set ANTHROPIC_BASE_URL=
+```
+
+### macOS / Linux (bash / zsh)
+
+```bash
+# 1. For the current shell session
+unset ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+
+# 2. (Optional) Remove the exports from your shell rc file
+#    Edit ~/.bashrc, ~/.zshrc, or ~/.profile and delete the export lines
+```
+
+---
+
+## Step 1 — Sanity check: can Claude Code reach your wrapper?
+
+```bash
+cd your-project
+claude "say hello"
+```
+
+- **Expected**: Claude Code starts and replies "hello" through your wrapper provider.
+- **If `401 Unauthorized`**: go back to **Prerequisites** above and clear the conflicting environment variables, then retry.
+
+---
+
+## Step 2 — Logout
+
+```bash
+claude logout
+```
+
+Clears the session so the next launch picks up the proxy-routed configuration cleanly.
+
+---
+
+## Step 3 — Override the target URL through Headroom
+
+**The idea**: instead of pointing Claude Code directly at your provider's URL (e.g. `https://api.minimax.io/anthropic`), you let Headroom's local proxy intercept the traffic and forward it to the provider. This allows Headroom to compress requests before they leave your machine.
+
+### PowerShell
+
+```powershell
+cd your-project
+$env:ANTHROPIC_TARGET_API_URL = "https://api.minimax.io/anthropic"
 headroom wrap claude
 ```
 
-### Linux/macOS Setup
-
-Configure the environment variables:
+### macOS / Linux
 
 ```bash
-export ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic
-export ANTHROPIC_AUTH_TOKEN=your_zai_api_key
-```
-
-Then run the wrapper:
-
-```bash
+cd your-project
+export ANTHROPIC_TARGET_API_URL="https://api.minimax.io/anthropic"
 headroom wrap claude
 ```
 
-## How it works
+### Verify Headroom is in the path
 
-This implementation preserves your custom `ANTHROPIC_BASE_URL` setting and forwards it to the Headroom proxy, so compressed requests are properly routed to your chosen Anthropic-compatible gateway (z.AI or others).
+After `headroom wrap claude` starts, open one of these files and check the value:
 
-The custom URL is captured before it would be overwritten by the proxy URL, ensuring your gateway configuration is respected throughout the wrap session.
+- `~/.claude/settings.json`
+- `<your-project>/.claude/settings.local.json`
 
-## Environment Variables
+You should see:
 
-- `ANTHROPIC_BASE_URL`: Your custom Anthropic-compatible API endpoint (e.g., `https://api.z.ai/api/anthropic`)
-- `ANTHROPIC_AUTH_TOKEN`: Your API authentication token for the custom gateway
+```json
+"ANTHROPIC_BASE_URL": "http://127.0.0.1:8787"
+```
 
-## Additional Notes
+> :warning: If `ANTHROPIC_BASE_URL` is still pointing at your provider's URL (e.g. `https://api.minimax.io/anthropic`), Headroom is **not** in the path and savings will not apply. Stop the session (`Ctrl+C`), re-check **Prerequisites**, and rerun.
 
-- The default Anthropic endpoint (`https://api.anthropic.com`) is automatically detected and not forwarded (the proxy already uses it by default)
-- Loopback protection prevents the proxy from being configured to point to itself
-- Compatible with Azure AI Foundry and Vertex modes - this enhancement only applies to the default Anthropic path
+---
+
+## Step 4 — Enjoy
+
+Talk to Claude Code as usual. All Anthropic-format traffic now flows through the local Headroom proxy, which compresses requests before forwarding them to your provider.
+
+---
+
+## Step 5 — On exit
+
+When you stop the session (`Ctrl+C` or `exit`), `headroom wrap` automatically restores `ANTHROPIC_BASE_URL` to its previous value (e.g. `https://api.minimaxi.com/anthropic`). No manual cleanup needed.
